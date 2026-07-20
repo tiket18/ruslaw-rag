@@ -2,49 +2,71 @@
 
 Векторный поиск по российскому праву: кодексы, постановления правительства, определения КС РФ, пленум ВС РФ.
 
-**Датасет:** [irlspbru/RusLawOD](https://huggingface.co/datasets/irlspbru/RusLawOD) (304K док., 1991–2025) + Пленум ВС (926 док.)
+**Продакшн-сервер:** `mario` (188.143.213.150), **веб-морда:** `d.wau.spb.ru`
 
-**Модель:** `Roflmax/bge-m3-legal-ru-cocktail-40-60` — dense (1024d) + sparse вектора
+## Демоны
 
-**Хранилище:** Qdrant, коллекция `law_ru`, 1.1M чанков
+| Сервис | Порт | Роль |
+|--------|------|------|
+| `ollama-proxy.service` | 11401 | FastAPI-прокси: Ollama ↔ OpenAI API, MTP/Eagle3 |
+| `ollama.service` | 11434 | Ollama (магистраль) |
+| `qdrant.service` | 6333 | Векторное хранилище |
 
-## Состав
+**Qdrant:** коллекция `law_ru`, **1 106 682 точки** (RusLawOD + Пленум ВС).  
+Данные на диске: `/home/vllm/qdrant_storage/`.
 
-| Компонент | Описание |
-|-----------|----------|
-| [`rag_update.py`](rag_update.py) | Единый пайплайн: фильтрация → чанкинг → эмбеддинг → Qdrant |
-| [`rag_prep/`](rag_prep/) | Скрипты этапов пайплайна (fetch, chunk, embed, load, eval) |
-| [`fetch_plenum.py`](fetch_plenum.py) | Парсер Пленума ВС с plenum.rf |
-| [`merge_plenum.py`](merge_plenum.py) | Слияние plenum.rf + legalacts.ru |
-| [`fetch_vsrf.py`](fetch_vsrf.py) | Альтернативный парсер с vsrf.ru |
-| [`load_parts_sequential.py`](load_parts_sequential.py) | Загрузка эмбеддингов в Qdrant по частям |
-| [`embed_resumable.py`](embed_resumable.py) | Эмбеддинг с чекпоинтами (resume после сбоя) |
+## Источники
+
+- **[irlspbru/RusLawOD](https://huggingface.co/datasets/irlspbru/RusLawOD)** — 304 864 док., 1991–2025, 5.9 GB parquet
+- **Пленум ВС** — 926 док. (plenum.rf + legalacts.ru), 9 050 чанков
+- Фильтрация: кодексы + ФЗ + ПП РФ + КС РФ → 112 508 док. → 1 097 632 чанка
+
+## Модель эмбеддингов
+
+`Roflmax/bge-m3-legal-ru-cocktail-40-60` (2.2 GB, GPU):
+- dense: 1024d, COSINE
+- sparse: lexical_weights
+- batch: 256, max_length: 8192, fp16
+- ~256 chunks/sec на RTX 3060 (12 GB)
+
+## Скрипты
+
+| Файл | Назначение |
+|------|------------|
+| `rag_update.py` | Единый пайплайн: download → filter → chunk → embed → qdrant |
+| `rag_prep/` | Поэтапные скрипты (fetch, chunk, embed, load, eval) |
+| `fetch_plenum.py` | Парсер Пленума ВС с plenum.rf |
+| `merge_plenum.py` | Слияние plenum.rf + legalacts.ru |
+| `fetch_vsrf.py` | Парсер Пленума ВС с vsrf.ru |
+| `load_parts_sequential.py` | Загрузка эмбеддингов в Qdrant по частям |
+| `load_part_server.py` | Серверная загрузка эмбеддингов |
+| `embed_resumable.py` | Эмбеддинг с чекпоинтами |
 
 ## Pipeline
 
 ```
 RusLawOD (11 parquet, 304K docs)
-  → фильтр: codes + government + constitutional_court (~52K docs)
-  → chunking (1500 chars, 200 overlap)
+  → фильтр: codes + fz + gov + ks (112K docs)
+  → chunking (1500 chars, 200 overlap) → 1.1M chunks
   → BGE-M3 эмбеддинг (batch=256, GPU)
-  → загрузка в Qdrant
+  → загрузка в Qdrant collection law_ru
 ```
 
-## Требования
+## Быстрый старт
 
 ```bash
+# Установка
 pip install FlagEmbedding qdrant-client torch tqdm transformers
-```
 
-Qdrant server на `localhost:6333`, коллекция `law_ru`:
+# Qdrant
+wget https://github.com/qdrant/qdrant/releases/latest/download/qdrant-x86_64-unknown-linux-gnu.tar.gz
+tar xzf qdrant-*.tar.gz && ./qdrant &
 
-```python
-vectors_config = {
-    "dense": VectorParams(size=1024, distance=Distance.COSINE),
-}
-sparse_vectors_config = {
-    "sparse": SparseVectorParams(index={"on_disk": True}),
-}
+# Полный цикл
+python3 rag_update.py --full
+
+# Статус
+python3 rag_update.py --status
 ```
 
 ## Пример поиска
@@ -73,7 +95,13 @@ def search(query, top_k=10):
 
 ## Статус
 
-- ✅ RusLawOD: 1.1M чанков в Qdrant
-- ✅ Пленум ВС: 9K чанков (plenum.rf + legalacts.ru)
-- ✅ BGE-M3: dense + sparse, 1024d
-- `rag_unload` — тяжёлые LLM выгружаются перед эмбеддингом
+| Компонент | Объём |
+|-----------|-------|
+| 🔹 RusLawOD parquet | 304 864 док., 5.9 GB |
+| 🔹 Отфильтровано | 112 508 док., 2.2 GB |
+| 🔹 Чанков | 1 097 632, 3.3 GB |
+| 🔹 Эмбеддингов | 1 097 633, 24.3 GB |
+| 🔹 Пленум ВС | 9 050 чанков |
+| 🔹 **Всего в Qdrant** | **1 106 682 точки** |
+| 🔹 GPU (RTX 3060) | 8.7 GB / 12 GB |
+| 🔹 Диск /home | 348 / 420 GB (70 GB free) |
